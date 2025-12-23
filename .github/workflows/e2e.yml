@@ -6,7 +6,6 @@ on:
 
 jobs:
   e2e:
-    if: ${{ secrets.OPENROUTER_API_KEY != '' }}
     runs-on: ubuntu-latest
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
