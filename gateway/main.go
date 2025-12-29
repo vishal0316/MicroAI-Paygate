@@ -66,7 +66,7 @@ func main() {
 	r.Run(":" + port)
 }
 
-//   - 500: Verifier or AI service failure (includes error details)
+// - 500: Verifier or AI service failure (includes error details)
 func handleSummarize(c *gin.Context) {
 	signature := c.GetHeader("X-402-Signature")
 	nonce := c.GetHeader("X-402-Nonce")
@@ -157,9 +157,8 @@ func getRecipientAddress() string {
 	return addr
 }
 
-// callOpenRouter sends the given text to the OpenRouter chat completions API requesting a two-sentence summary and returns the generated summary.
-//
-// It reads OPENROUTER_API_KEY for authorization and OPENROUTER_MODEL to select the model (defaults to "z-ai/glm-4.5-air:free" if unset). The function returns the summary string on success or a non-nil error if the HTTP request fails or the API response is not in the expected format.
+// getPaymentAmount returns the payment amount from the PAYMENT_AMOUNT environment variable.
+// If unset, it defaults to "0.001".
 func getPaymentAmount() string {
 	amount := os.Getenv("PAYMENT_AMOUNT")
 	if amount == "" {
@@ -168,6 +167,8 @@ func getPaymentAmount() string {
 	return amount
 }
 
+// getChainID returns the blockchain chain ID from the CHAIN_ID environment variable.
+// If unset or invalid, it defaults to 8453 (Base).
 func getChainID() int {
 	chainIDStr := os.Getenv("CHAIN_ID")
 	if chainIDStr == "" {
@@ -181,6 +182,10 @@ func getChainID() int {
 	return chainID
 }
 
+// callOpenRouter sends the given text to the OpenRouter chat completions API
+// requesting a two-sentence summary and returns the generated summary.
+// It reads OPENROUTER_API_KEY for authorization and OPENROUTER_MODEL to select
+// the model (defaults to "z-ai/glm-4.5-air:free" if unset).
 func callOpenRouter(text string) (string, error) {
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 	model := os.Getenv("OPENROUTER_MODEL")
