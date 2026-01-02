@@ -14,7 +14,7 @@ WORKDIR /home/appuser
 # Copy binary
 COPY --from=builder /app/gateway /home/appuser/gateway
 
-# 🔴 THIS IS THE IMPORTANT LINE
+# Copy OpenAPI spec for /docs and /openapi.yaml endpoints
 COPY --from=builder /app/openapi.yaml /home/appuser/openapi.yaml
 
 RUN chown -R appuser:appuser /home/appuser

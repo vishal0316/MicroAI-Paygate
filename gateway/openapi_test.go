@@ -2,12 +2,14 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestOpenAPISpecMatchesRoutes(t *testing.T) {
-	data, err := os.ReadFile("openapi.yaml")
+	specPath := filepath.Join(".", "openapi.yaml")
+	data, err := os.ReadFile(specPath)
 	if err != nil {
 		t.Fatalf("failed to read openapi.yaml: %v", err)
 	}

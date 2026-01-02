@@ -87,14 +87,24 @@ paths:
                     properties:
                       recipient:
                         type: string
+                        description: Ethereum address of payment recipient
+                        example: "0x2cAF48b4BA1C58721a85dFADa5aC01C2DFa62219"
                       token:
                         type: string
+                        description: Token symbol for payment
+                        example: "USDC"
                       amount:
                         type: string
+                        description: Payment amount in token units
+                        example: "0.001"
                       nonce:
                         type: string
+                        description: Unique payment nonce (UUID)
+                        example: "550e8400-e29b-41d4-a716-446655440000"
                       chainId:
                         type: integer
+                        description: Blockchain network ID
+                        example: 8453
 
         "403":
           description: Invalid signature
