@@ -240,13 +240,15 @@ func TestGetRateLimitKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
-		name         string
-		nonce        string
-		expectedType string
+		name        string
+		signature   string
+		nonce       string
+		expectedKey string
 	}{
-		{"With nonce", "abcdefghijklmnop", "nonce:"},
-		{"With short nonce", "abc", "nonce:"},
-		{"Without nonce", "", "ip:"},
+		{"With both signature and nonce", "sig123", "test-nonce", "nonce:"},
+		{"Only nonce (no signature)", "", "test-nonce", "ip:"},
+		{"Only signature (no nonce)", "sig123", "", "ip:"},
+		{"Neither", "", "", "ip:"},
 	}
 
 	for _, tt := range tests {
@@ -254,15 +256,14 @@ func TestGetRateLimitKey(t *testing.T) {
 			r := gin.Default()
 			r.GET("/test", func(c *gin.Context) {
 				key := getRateLimitKey(c)
-				if tt.nonce != "" {
-					// Key should start with "nonce:" followed by hash (16 hex chars)
+				
+				if strings.HasPrefix(tt.expectedKey, "nonce:") {
 					if !strings.HasPrefix(key, "nonce:") {
-						t.Errorf("Expected key to start with 'nonce:', got '%s'", key)
+						t.Errorf("Expected nonce-based key, got '%s'", key)
 					}
-					// Verify hash portion is 16 hex characters
 					hashPart := strings.TrimPrefix(key, "nonce:")
-					if len(hashPart) != 16 {
-						t.Errorf("Expected hash to be 16 chars, got %d: '%s'", len(hashPart), hashPart)
+					if len(hashPart) != 32 {
+						t.Errorf("Expected hash to be 32 chars, got %d", len(hashPart))
 					}
 				} else {
 					if !strings.HasPrefix(key, "ip:") {
@@ -273,6 +274,9 @@ func TestGetRateLimitKey(t *testing.T) {
 			})
 
 			req, _ := http.NewRequest("GET", "/test", nil)
+			if tt.signature != "" {
+				req.Header.Set("X-402-Signature", tt.signature)
+			}
 			if tt.nonce != "" {
 				req.Header.Set("X-402-Nonce", tt.nonce)
 			}

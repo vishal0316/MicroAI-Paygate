@@ -31,6 +31,7 @@ type TokenBucket struct {
 	burst      int           // Maximum tokens in bucket
 	buckets    sync.Map      // map[string]*bucket - thread-safe map of user buckets
 	cleanupTTL time.Duration // Time after which inactive buckets are cleaned up
+	stopCh     chan struct{} // Channel to stop cleanup goroutine
 }
 
 // NewTokenBucket creates a new TokenBucket rate limiter
@@ -38,21 +39,20 @@ type TokenBucket struct {
 // burst: maximum burst size (max tokens)
 // cleanupTTL: duration after which inactive buckets are removed
 func NewTokenBucket(rpm int, burst int, cleanupTTL time.Duration) *TokenBucket {
-	// Validate parameters to prevent division by zero and invalid configurations
 	if rpm <= 0 {
-		rpm = 1 // Default to minimum 1 request per minute
+		rpm = 1
 	}
 	if burst <= 0 {
-		burst = 1 // Default to minimum 1 token burst
+		burst = 1
 	}
 	
 	tb := &TokenBucket{
-		rate:       float64(rpm) / 60.0, // Convert RPM to tokens per second
+		rate:       float64(rpm) / 60.0,
 		burst:      burst,
 		cleanupTTL: cleanupTTL,
+		stopCh:     make(chan struct{}),
 	}
 	
-	// Start cleanup goroutine
 	go tb.cleanup()
 	
 	return tb
@@ -100,62 +100,75 @@ func (tb *TokenBucket) AllowN(key string, n int) bool {
 
 // GetRemaining returns the number of remaining tokens for the given key
 func (tb *TokenBucket) GetRemaining(key string) int {
-	b := tb.getBucket(key)
+	val, ok := tb.buckets.Load(key)
+	if !ok {
+		return tb.burst
+	}
+	
+	b := val.(*bucket)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	now := time.Now()
 	elapsed := now.Sub(b.lastCheck).Seconds()
-	
-	// Calculate tokens without updating lastCheck (read-only operation)
 	tokens := math.Min(float64(tb.burst), b.tokens+elapsed*tb.rate)
-	
+
 	return int(math.Floor(tokens))
 }
 
 // GetResetTime returns the Unix timestamp when the bucket will be fully refilled
 func (tb *TokenBucket) GetResetTime(key string) int64 {
-	b := tb.getBucket(key)
+	val, ok := tb.buckets.Load(key)
+	if !ok {
+		return time.Now().Unix()
+	}
+	
+	b := val.(*bucket)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	now := time.Now()
 	elapsed := now.Sub(b.lastCheck).Seconds()
-	
-	// Calculate current tokens
 	currentTokens := math.Min(float64(tb.burst), b.tokens+elapsed*tb.rate)
-	
-	// Calculate time needed to reach burst capacity
+
 	tokensNeeded := float64(tb.burst) - currentTokens
 	if tokensNeeded <= 0 {
 		return now.Unix()
 	}
-	
+
 	secondsToFull := tokensNeeded / tb.rate
 	resetTime := now.Add(time.Duration(secondsToFull * float64(time.Second)))
-	
+
 	return resetTime.Unix()
 }
 
 // cleanup runs in a background goroutine to remove stale buckets
 // This prevents memory leaks from inactive users
+func (tb *TokenBucket) Stop() {
+	close(tb.stopCh)
+}
+
 func (tb *TokenBucket) cleanup() {
 	ticker := time.NewTicker(tb.cleanupTTL)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		now := time.Now()
-		tb.buckets.Range(func(key, value interface{}) bool {
-			b := value.(*bucket)
-			b.mu.Lock()
-			lastCheck := b.lastCheck
-			b.mu.Unlock()
+	for {
+		select {
+		case <-tb.stopCh:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			tb.buckets.Range(func(key, value interface{}) bool {
+				b := value.(*bucket)
+				b.mu.Lock()
+				lastCheck := b.lastCheck
+				b.mu.Unlock()
 
-			// Remove bucket if it hasn't been used in cleanupTTL duration
-			if now.Sub(lastCheck) > tb.cleanupTTL {
-				tb.buckets.Delete(key)
-			}
-			return true
-		})
+				if now.Sub(lastCheck) > tb.cleanupTTL {
+					tb.buckets.Delete(key)
+				}
+				return true
+			})
+		}
 	}
 }
