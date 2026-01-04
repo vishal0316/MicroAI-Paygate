@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -138,8 +139,16 @@ func main() {
 		log.Println("Rate limiting enabled")
 	}
 
-	r.GET("/healthz", handleHealth)
-	r.POST("/api/ai/summarize", handleSummarize)
+	// Global request timeout middleware
+	r.Use(RequestTimeoutMiddleware(getRequestTimeout()))
+
+	// Health check with shorter timeout
+	r.GET("/healthz", RequestTimeoutMiddleware(getHealthCheckTimeout()), handleHealth)
+
+	// AI endpoints with AI-specific timeout
+	aiGroup := r.Group("/api/ai")
+	aiGroup.Use(RequestTimeoutMiddleware(getAITimeout()))
+	aiGroup.POST("/summarize", handleSummarize)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -185,8 +194,19 @@ func handleSummarize(c *gin.Context) {
 	if verifierURL == "" {
 		verifierURL = "http://127.0.0.1:3002"
 	}
-	resp, err := http.Post(verifierURL+"/verify", "application/json", bytes.NewBuffer(verifyBody))
+	// Call verifier with its own timeout
+	verifierCtx, verifierCancel := context.WithTimeout(c.Request.Context(), getVerifierTimeout())
+	defer verifierCancel()
+
+	vreq, _ := http.NewRequestWithContext(verifierCtx, "POST", verifierURL+"/verify", bytes.NewBuffer(verifyBody))
+	vreq.Header.Set("Content-Type", "application/json")
+	client := &http.Client{}
+	resp, err := client.Do(vreq)
 	if err != nil {
+		if verifierCtx.Err() == context.DeadlineExceeded {
+			c.JSON(504, gin.H{"error": "Gateway Timeout", "message": "Verifier request timed out"})
+			return
+		}
 		c.JSON(500, gin.H{"error": "Verification service unavailable"})
 		return
 	}
@@ -210,8 +230,13 @@ func handleSummarize(c *gin.Context) {
 		return
 	}
 
-	summary, err := callOpenRouter(req.Text)
+	summary, err := callOpenRouter(c.Request.Context(), req.Text)
 	if err != nil {
+		// If the error was due to a timeout, return 504
+		if strings.Contains(strings.ToLower(err.Error()), "timeout") || c.Request.Context().Err() == context.DeadlineExceeded {
+			c.JSON(504, gin.H{"error": "Gateway Timeout", "message": "AI request timed out"})
+			return
+		}
 		c.JSON(500, gin.H{"error": "AI Service Failed", "details": err.Error()})
 		return
 	}
@@ -270,7 +295,7 @@ func getChainID() int {
 // requesting a two-sentence summary and returns the generated summary.
 // It reads OPENROUTER_API_KEY for authorization and OPENROUTER_MODEL to select
 // the model (defaults to "z-ai/glm-4.5-air:free" if unset).
-func callOpenRouter(text string) (string, error) {
+func callOpenRouter(ctx context.Context, text string) (string, error) {
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 	model := os.Getenv("OPENROUTER_MODEL")
 	if model == "" {
@@ -286,13 +311,21 @@ func callOpenRouter(text string) (string, error) {
 		},
 	})
 
-	req, _ := http.NewRequest("POST", "https://openrouter.ai/api/v1/chat/completions", bytes.NewBuffer(reqBody))
+	openRouterURL := os.Getenv("OPENROUTER_URL")
+	if openRouterURL == "" {
+		openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
+	}
+	req, _ := http.NewRequestWithContext(ctx, "POST", openRouterURL, bytes.NewBuffer(reqBody))
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
+		// If the context was canceled due to deadline exceeded, return a timeout error
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("OpenRouter request timeout")
+		}
 		return "", err
 	}
 	defer resp.Body.Close()
