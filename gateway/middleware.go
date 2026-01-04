@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +21,8 @@ type bufferedWriter struct {
 	head   http.Header
 	status int
 	wrote  bool
+	closed bool
+	mu     sync.RWMutex
 }
 
 // newBufferedWriter returns an initialized bufferedWriter used to capture
@@ -34,28 +37,52 @@ func newBufferedWriter() *bufferedWriter {
 
 // Header returns the local header map for the buffered response.
 func (b *bufferedWriter) Header() http.Header {
-	return b.head
+	b.mu.RLock()
+	head := b.head
+	b.mu.RUnlock()
+	return head
 }
 
 func (b *bufferedWriter) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return 0, nil
+	}
 	b.wrote = true
 	return b.buf.Write(data)
 }
 
 func (b *bufferedWriter) WriteString(s string) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return 0, nil
+	}
 	b.wrote = true
 	return b.buf.WriteString(s)
 }
 
 // WriteHeader captures the status code but does not flush to the client.
 func (b *bufferedWriter) WriteHeader(statusCode int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
 	b.status = statusCode
 }
 
-// WriteHeaderNow is a no-op to avoid flushing headers to the client while
-// we're buffering.
+// WriteHeaderNow records that headers are being written now; it does not
+// flush to the client but ensures a status is set and marks the writer as
+// having written data so subsequent flush respects status.
 func (b *bufferedWriter) WriteHeaderNow() {
-	// Intentionally left blank - avoid flushing
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.status == 0 {
+		b.status = http.StatusOK
+	}
+	b.wrote = true
 }
 
 // Status returns the status code that the handler set (or 200 by default).
@@ -68,6 +95,8 @@ func (b *bufferedWriter) Status() int {
 
 // flushTo writes buffered headers and body to the real writer.
 func (b *bufferedWriter) flushTo(w http.ResponseWriter) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	for k, vv := range b.head {
 		for _, v := range vv {
 			w.Header().Add(k, v)
@@ -108,19 +137,21 @@ func RequestTimeoutMiddleware(timeout time.Duration) gin.HandlerFunc {
 		}()
 		select {
 		case <-finished:
-			// Handler finished before deadline: flush buffered response
-			c.Writer = origWriter
+			// Handler finished before deadline: flush buffered response. Do not
+			// restore c.Writer here to avoid racing with handler goroutine.
 			bw.flushTo(origWriter)
 			return
 		case p := <-panicChan:
 			// Restore the original writer so upstream Recovery middleware writes
-			// directly to the real response (not the buffer), then re-panic so
-			// Recovery can catch it and return 500.
+			// directly to the real response, then re-panic so Recovery can handle it.
 			c.Writer = origWriter
 			panic(p)
 		case <-ctx.Done():
-			// Timeout exceeded — send 504 using the original writer and
-			// discard buffered handler response.
+			// Timeout exceeded — mark buffer closed to prevent further handler
+			// writes, then restore the original writer and send 504.
+			bw.mu.Lock()
+			bw.closed = true
+			bw.mu.Unlock()
 			c.Writer = origWriter
 			origWriter.Header().Set("Content-Type", "application/json; charset=utf-8")
 			origWriter.WriteHeader(504)

@@ -120,4 +120,3 @@ func TestHandleSummarize_AIRequestTimeoutReturns504(t *testing.T) {
 		t.Fatalf("Handler response leaked after timeout: %s", w.Body.String())
 	}
 }
-
