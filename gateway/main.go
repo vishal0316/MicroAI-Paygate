@@ -210,10 +210,23 @@ func handleSummarize(c *gin.Context) {
 		return
 	}
 	vreq.Header.Set("Content-Type", "application/json")
-	client := &http.Client{}
-	resp, err := client.Do(vreq)
+	// Configure HTTP client with a timeout derived from the verifier context
+	var resp *http.Response
+	if deadline, ok := verifierCtx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			c.JSON(504, gin.H{"error": "Gateway Timeout", "message": "Verifier request timed out"})
+			return
+		}
+		client := &http.Client{Timeout: remaining}
+		resp, err = client.Do(vreq)
+	} else {
+		// No deadline on verifierCtx - fall back to a conservative timeout
+		client := &http.Client{Timeout: getVerifierTimeout()}
+		resp, err = client.Do(vreq)
+	}
+
 	if err != nil {
-		// If the verifier or parent context timed out, return Gateway Timeout
 		if verifierCtx.Err() == context.DeadlineExceeded || c.Request.Context().Err() == context.DeadlineExceeded {
 			c.JSON(504, gin.H{"error": "Gateway Timeout", "message": "Verifier request timed out"})
 			return
@@ -333,10 +346,22 @@ func callOpenRouter(ctx context.Context, text string) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	// Configure HTTP client timeout based on request context's deadline if present
+	var resp *http.Response
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return "", context.DeadlineExceeded
+		}
+		client := &http.Client{Timeout: remaining}
+		resp, err = client.Do(req)
+	} else {
+		// No deadline on ctx — use configured AI timeout as a sensible default
+		client := &http.Client{Timeout: getAITimeout()}
+		resp, err = client.Do(req)
+	}
+
 	if err != nil {
-		// If the context was canceled due to deadline exceeded, return the sentinel error
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", context.DeadlineExceeded
 		}

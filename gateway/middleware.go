@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -89,22 +92,20 @@ func RequestTimeoutMiddleware(timeout time.Duration) gin.HandlerFunc {
 
 		origWriter := c.Writer
 		bw := newBufferedWriter()
-		// replace the gin writer with a shim that uses bw
-		c.Writer = &responseWriterShim{bw: bw}
+	// replace the gin writer with a shim that uses bw and keeps orig writer
+	c.Writer = &responseWriterShim{bw: bw, orig: origWriter}
+	finished := make(chan struct{})
+	panicChan := make(chan interface{}, 1)
 
-		finished := make(chan struct{})
-		panicChan := make(chan interface{}, 1)
-
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					panicChan <- r
-				}
-			}()
-			c.Next()
-			close(finished)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicChan <- r
+			}
 		}()
-
+		c.Next()
+		close(finished)
+	}()
 		select {
 		case <-finished:
 			// Handler finished before deadline: flush buffered response
@@ -112,7 +113,10 @@ func RequestTimeoutMiddleware(timeout time.Duration) gin.HandlerFunc {
 			bw.flushTo(origWriter)
 			return
 		case p := <-panicChan:
-			// Re-panic in this goroutine so upstream recovery runs as expected
+			// Restore the original writer so upstream Recovery middleware writes
+			// directly to the real response (not the buffer), then re-panic so
+			// Recovery can catch it and return 500.
+			c.Writer = origWriter
 			panic(p)
 		case <-ctx.Done():
 			// Timeout exceeded — send 504 using the original writer and
@@ -130,7 +134,8 @@ func RequestTimeoutMiddleware(timeout time.Duration) gin.HandlerFunc {
 // handlers that call c.Writer/SetHeader interact with the buffered headers
 // and body. It forwards writes to the underlying bufferedWriter instance.
 type responseWriterShim struct {
-	bw *bufferedWriter
+	bw   *bufferedWriter
+	orig gin.ResponseWriter
 }
 
 func (rws *responseWriterShim) Header() http.Header { return rws.bw.Header() }
@@ -142,5 +147,39 @@ func (rws *responseWriterShim) Status() int { return rws.bw.Status() }
 func (rws *responseWriterShim) Written() bool { return rws.bw.wrote }
 func (rws *responseWriterShim) Size() int { return rws.bw.buf.Len() }
 func (rws *responseWriterShim) WriteHeaderNowWithoutLock() {}
+
+// Flush flushes the response to the client if the underlying writer
+// supports http.Flusher. This is a no-op otherwise.
+func (rws *responseWriterShim) Flush() {
+	if fl, ok := rws.orig.(http.Flusher); ok {
+		fl.Flush()
+	}
+}
+
+// Hijack delegates to the underlying writer if it supports http.Hijacker.
+func (rws *responseWriterShim) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := rws.orig.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("hijack not supported")
+}
+
+// Pusher delegates to the underlying writer if it supports http.Pusher.
+func (rws *responseWriterShim) Pusher() http.Pusher {
+	if p, ok := rws.orig.(http.Pusher); ok { return p }
+	return nil
+}
+
+// CloseNotify delegates to the original writer's CloseNotify when available.
+// If the original writer does not support CloseNotify, return a closed channel
+// to indicate the connection is not closable via this notification.
+func (rws *responseWriterShim) CloseNotify() <-chan bool {
+	if rws.orig != nil {
+		return rws.orig.CloseNotify()
+	}
+	ch := make(chan bool)
+	close(ch)
+	return ch
+}
 
 
